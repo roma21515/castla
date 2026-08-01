@@ -699,9 +699,124 @@ class PrivilegedService : IPrivilegedService.Stub() {
         }
     }
 
-    override fun addInterfaceAddress(ifName: String, address: String, prefixLength: Int): Boolean { return true }
-    override fun removeInterfaceAddress(ifName: String, address: String, prefixLength: Int): Boolean { return true }
-    override fun setupTeslaNetworking(ifName: String, virtualIp: String): String { return "" }
+    // --- Tesla virtual IP (100.99.9.9) alias management ---
+    // Tesla's browser refuses RFC1918 addresses; the CGNAT alias lets it connect.
+
+    /**
+     * Add an IP alias via the netd binder (INetd.interfaceAddAddress).
+     * netd runs as root and accepts this call from the shell uid on most builds.
+     * Returns true only if the binder call completed without throwing —
+     * callers must verify the alias with `ip -o addr show`.
+     */
+    override fun addInterfaceAddress(ifName: String, address: String, prefixLength: Int): Boolean {
+        return try {
+            val smClass = Class.forName("android.os.ServiceManager")
+            val getService = smClass.getMethod("getService", String::class.java)
+            val netdBinder = getService.invoke(null, "netd") as? android.os.IBinder
+            if (netdBinder == null) {
+                Log.w(TAG, "addInterfaceAddress: netd binder is null")
+                return false
+            }
+            val stubClass = Class.forName("android.net.INetd\$Stub")
+            val asInterface = stubClass.getMethod("asInterface", android.os.IBinder::class.java)
+            val netd = asInterface.invoke(null, netdBinder)
+            netd.javaClass.getMethod(
+                "interfaceAddAddress",
+                String::class.java, String::class.java, Int::class.javaPrimitiveType
+            ).invoke(netd, ifName, address, prefixLength)
+            Log.i(TAG, "addInterfaceAddress: netd accepted $address/$prefixLength on $ifName")
+            true
+        } catch (e: Exception) {
+            Log.w(TAG, "addInterfaceAddress: netd failed: ${e.message}")
+            false
+        }
+    }
+
+    /**
+     * Remove an IP alias: netd binder first, `ip addr del` fallback (root).
+     * Best effort — returns true if either path completed.
+     */
+    override fun removeInterfaceAddress(ifName: String, address: String, prefixLength: Int): Boolean {
+        try {
+            val smClass = Class.forName("android.os.ServiceManager")
+            val getService = smClass.getMethod("getService", String::class.java)
+            val netdBinder = getService.invoke(null, "netd") as? android.os.IBinder
+            if (netdBinder != null) {
+                val stubClass = Class.forName("android.net.INetd\$Stub")
+                val asInterface = stubClass.getMethod("asInterface", android.os.IBinder::class.java)
+                val netd = asInterface.invoke(null, netdBinder)
+                netd.javaClass.getMethod(
+                    "interfaceDelAddress",
+                    String::class.java, String::class.java, Int::class.javaPrimitiveType
+                ).invoke(netd, ifName, address, prefixLength)
+                Log.i(TAG, "removeInterfaceAddress: netd removed $address/$prefixLength on $ifName")
+                return true
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "removeInterfaceAddress: netd failed: ${e.message}")
+        }
+        return try {
+            execCommand("ip addr del $address/$prefixLength dev $ifName")
+            true
+        } catch (e: Exception) {
+            Log.w(TAG, "removeInterfaceAddress: ip cmd failed: ${e.message}")
+            false
+        }
+    }
+
+    /**
+     * Full Tesla network setup, idempotent. Cascade:
+     *   0. alias already present → done
+     *   1. INetd binder add → verify
+     *   2. `ip addr add` shell fallback (root) → verify
+     * Verification always re-reads `ip -o addr show dev <ifName>`.
+     * Returns a diagnostic log; final line is RESULT: OK or RESULT: FAIL.
+     */
+    override fun setupTeslaNetworking(ifName: String, virtualIp: String): String {
+        val log = StringBuilder("=== setupTeslaNetworking($ifName, $virtualIp) ===\n")
+
+        fun aliasPresent(): Boolean {
+            val out = execCommand("ip -o addr show dev $ifName")
+            return out.lineSequence().any { line ->
+                val tokens = line.trim().split(Regex("\\s+"))
+                tokens.size >= 4 && tokens[2] == "inet" &&
+                    tokens[3].substringBefore('/') == virtualIp
+            }
+        }
+
+        if (aliasPresent()) {
+            log.appendLine("alias already present — nothing to do")
+            log.appendLine("RESULT: OK")
+            Log.i(TAG, log.toString())
+            return log.toString()
+        }
+
+        log.appendLine("-- method 1: INetd binder --")
+        if (addInterfaceAddress(ifName, virtualIp, 32)) {
+            if (aliasPresent()) {
+                log.appendLine("alias verified after netd")
+                log.appendLine("RESULT: OK")
+                Log.i(TAG, log.toString())
+                return log.toString()
+            }
+            log.appendLine("netd returned success but alias missing after verify")
+        } else {
+            log.appendLine("netd method unavailable/failed")
+        }
+
+        log.appendLine("-- method 2: ip addr add (shell fallback) --")
+        execCommand("ip addr add $virtualIp/32 dev $ifName")
+        if (aliasPresent()) {
+            log.appendLine("alias verified after ip command")
+            log.appendLine("RESULT: OK")
+        } else {
+            log.appendLine("alias still missing — all methods failed")
+            log.appendLine("RESULT: FAIL")
+        }
+        Log.i(TAG, log.toString())
+        return log.toString()
+    }
+
     override fun restartTetheringWithCgnat(): String { return "" }
     override fun isAlive(): Boolean = true
 
