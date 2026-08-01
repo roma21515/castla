@@ -773,6 +773,18 @@ class PrivilegedService : IPrivilegedService.Stub() {
      * Returns a diagnostic log; final line is RESULT: OK or RESULT: FAIL.
      */
     override fun setupTeslaNetworking(ifName: String, virtualIp: String): String {
+        return try {
+            setupTeslaNetworkingInternal(ifName, virtualIp)
+        } catch (e: Exception) {
+            val msg = "=== setupTeslaNetworking($ifName, $virtualIp) ===\n" +
+                "unexpected error: ${e.message}\n" +
+                "RESULT: FAIL"
+            Log.w(TAG, msg, e)
+            msg
+        }
+    }
+
+    private fun setupTeslaNetworkingInternal(ifName: String, virtualIp: String): String {
         val log = StringBuilder("=== setupTeslaNetworking($ifName, $virtualIp) ===\n")
 
         fun aliasPresent(): Boolean {
