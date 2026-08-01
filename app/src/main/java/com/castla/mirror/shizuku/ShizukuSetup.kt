@@ -774,6 +774,23 @@ class ShizukuSetup {
     }
 
     /**
+     * Remove the Tesla virtual IP alias from the hotspot interface. Best effort.
+     */
+    fun removeTeslaNetwork(ifName: String, virtualIp: String = "100.99.9.9"): Boolean {
+        val service = privilegedService
+        if (service == null) {
+            Log.w(TAG, "removeTeslaNetwork: service not connected")
+            return false
+        }
+        return try {
+            service.removeInterfaceAddress(ifName, virtualIp, 32)
+        } catch (e: Exception) {
+            Log.e(TAG, "removeInterfaceAddress failed", e)
+            false
+        }
+    }
+
+    /**
      * Restart WiFi tethering with CGNAT IP (100.64.0.1/24).
      * Returns diagnostic log, or null if service not connected.
      */

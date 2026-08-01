@@ -57,6 +57,8 @@ import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import com.castla.mirror.network.NetworkMonitor
 import com.castla.mirror.network.NetworkState
+import com.castla.mirror.network.TeslaVirtualIp
+import com.castla.mirror.diagnostics.FileLogger
 import com.castla.mirror.service.HotspotClientDetector
 import com.castla.mirror.service.MirrorForegroundService
 import com.castla.mirror.service.TeslaBleScanner
@@ -103,6 +105,8 @@ class MainActivity : AppCompatActivity() {
     private var teslaAutoDetectEnabled by mutableStateOf(false)
     private var hotspotEnabledByApp = false
     private var isHotspotActive by mutableStateOf(false)
+    private var teslaVirtualIpActive by mutableStateOf(false)
+    private var teslaAliasIfName: String? = null
     private var isPanelOff by mutableStateOf(false)
     private var teslaBleScanner: TeslaBleScanner? = null
 
@@ -218,6 +222,9 @@ class MainActivity : AppCompatActivity() {
                         is NetworkState.Connected -> {
                             currentIp = state.ip
                             updateServerUrl()
+                            if (isStreaming && !teslaVirtualIpActive) {
+                                setupTeslaVirtualIp()
+                            }
                         }
                         is NetworkState.Disconnected -> {
                             currentIp = "0.0.0.0"
@@ -656,6 +663,12 @@ class MainActivity : AppCompatActivity() {
         } else {
             serverUrl = "http://${ip}:${MirrorServer.DEFAULT_PORT}"
         }
+
+        // Tesla compatibility: when the virtual alias is live, prefer it —
+        // the Tesla browser refuses RFC1918 addresses outright.
+        if (teslaVirtualIpActive) {
+            serverUrl = TeslaVirtualIp.virtualUrl(MirrorServer.DEFAULT_PORT)
+        }
     }
 
     private fun getCellularIpv4Address(): String? {
@@ -786,12 +799,77 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun findHotspotInterface(): String? {
-        val candidates = listOf("swlan0", "wlan1", "ap0", "softap0")
         val result = shizukuSetup.exec("ip -o addr show") ?: return null
-        for (name in candidates) {
-            if (result.contains(name)) return name
+        return TeslaVirtualIp.findHotspotInterface(TeslaVirtualIp.parseInterfaceAddresses(result))
+    }
+
+    /**
+     * Tesla compatibility mode: alias 100.99.9.9 onto the hotspot interface so
+     * the Tesla browser (which refuses RFC1918 ranges) can reach the server.
+     * Idempotent; runs entirely on the IO dispatcher; never blocks mirroring.
+     */
+    private fun setupTeslaVirtualIp() {
+        if (!shizukuSetup.serviceConnected.value) {
+            Log.i(TAG, "TeslaVirtualIp: privileged service not connected, skipping")
+            return
         }
-        return null
+        lifecycleScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            // Hotspot interface may take a few seconds to appear after enabling.
+            var ifName: String? = null
+            for (attempt in 1..15) {
+                val out = shizukuSetup.exec("ip -o addr show")
+                if (out != null) {
+                    val addrs = TeslaVirtualIp.parseInterfaceAddresses(out)
+                    val found = TeslaVirtualIp.findHotspotInterface(addrs)
+                    if (found != null) {
+                        if (TeslaVirtualIp.hasVirtualAlias(addrs, found)) {
+                            runOnUiThread {
+                                teslaAliasIfName = found
+                                teslaVirtualIpActive = true
+                                updateServerUrl()
+                            }
+                            return@launch
+                        }
+                        ifName = found
+                        break
+                    }
+                }
+                kotlinx.coroutines.delay(1000)
+            }
+            val target = ifName
+            if (target == null) {
+                Log.i(TAG, "TeslaVirtualIp: no hotspot interface (WiFi mode) — skipping")
+                return@launch
+            }
+            val diagLog = shizukuSetup.setupTeslaNetwork(target)
+            Log.i(TAG, "TeslaVirtualIp setup:\n$diagLog")
+            // Persist the full diagnostic so the on-disk log shows whether the
+            // alias-already-present fast-path, netd, or ip fallback succeeded —
+            // not just the trailing RESULT marker (which can be preceded by an
+            // empty line from appendLine()).
+            FileLogger.i(TAG, "TeslaVirtualIp setup on $target:\n$diagLog")
+            if (TeslaVirtualIp.setupSucceeded(diagLog)) {
+                runOnUiThread {
+                    teslaAliasIfName = target
+                    teslaVirtualIpActive = true
+                    updateServerUrl()
+                }
+            } else {
+                Log.w(TAG, "TeslaVirtualIp: setup failed, keeping original URL")
+                FileLogger.w(TAG, "TeslaVirtualIp setup failed on $target:\n$diagLog")
+            }
+        }
+    }
+
+    private fun teardownTeslaVirtualIp() {
+        val ifName = teslaAliasIfName ?: return
+        teslaAliasIfName = null
+        teslaVirtualIpActive = false
+        lifecycleScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            val ok = shizukuSetup.removeTeslaNetwork(ifName)
+            Log.i(TAG, "TeslaVirtualIp teardown on $ifName: $ok")
+            FileLogger.i(TAG, "TeslaVirtualIp teardown on $ifName: $ok")
+        }
     }
 
 
@@ -1223,6 +1301,7 @@ class MainActivity : AppCompatActivity() {
         bindRequested = bindService(intent, serviceConnection, Context.BIND_AUTO_CREATE)
         isStreaming = true
         refreshHotspotStatus()
+        setupTeslaVirtualIp()
         Log.i(TAG, "isStreaming=true, isPreparing=$isPreparing (service started)")
 
         // 서비스 바인드 + 서버 실행 확인 후 최소 2초 뒤에 preparing 해제
@@ -1267,6 +1346,7 @@ class MainActivity : AppCompatActivity() {
             isPreparing = false
         }
         isHotspotActive = false
+        teardownTeslaVirtualIp()
         updateServerUrl()
         com.castla.mirror.widget.MirrorWidgetProvider.updateAllWidgets(this)
 
