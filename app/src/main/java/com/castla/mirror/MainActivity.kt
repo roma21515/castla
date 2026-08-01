@@ -843,7 +843,11 @@ class MainActivity : AppCompatActivity() {
             }
             val diagLog = shizukuSetup.setupTeslaNetwork(target)
             Log.i(TAG, "TeslaVirtualIp setup:\n$diagLog")
-            FileLogger.i(TAG, "TeslaVirtualIp setup on $target: ${diagLog?.lines()?.lastOrNull()}")
+            // Persist the full diagnostic so the on-disk log shows whether the
+            // alias-already-present fast-path, netd, or ip fallback succeeded —
+            // not just the trailing RESULT marker (which can be preceded by an
+            // empty line from appendLine()).
+            FileLogger.i(TAG, "TeslaVirtualIp setup on $target:\n$diagLog")
             if (TeslaVirtualIp.setupSucceeded(diagLog)) {
                 runOnUiThread {
                     teslaAliasIfName = target
