@@ -114,7 +114,18 @@
                 <action android:name="android.companion.CompanionDeviceService" />
             </intent-filter>
         </service>
-
+        
+        <!-- Tesla VPN service-->
+        <service
+             android:name=".network.TeslaVpnService"
+             android:permission="android.permission.BIND_VPN_SERVICE"
+             android:exported="false">
+            <intent-filter>
+                <action android:name="android.net.VpnService" />
+            </intent-filter>
+        </service>
+        
+        
         <!-- Stop mirroring receiver (notification action) -->
         <receiver
             android:name=".service.MirrorForegroundService$StopReceiver"
