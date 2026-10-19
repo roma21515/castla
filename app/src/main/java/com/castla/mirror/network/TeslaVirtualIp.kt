@@ -19,7 +19,7 @@ object TeslaVirtualIp {
     const val RESULT_FAIL = "RESULT: FAIL"
 
     /** Hotspot interface names, highest priority first. */
-    private val HOTSPOT_IFACE_CANDIDATES = listOf("swlan0", "wlan1", "ap0", "softap0")
+    private val HOTSPOT_IFACE_CANDIDATES = listOf("swlan0", "wlan1", "ap0", "softap0", "wlan2")
 
     /**
      * Parse `ip -o addr show` output into ifName -> IPv4 addresses (without prefix).
