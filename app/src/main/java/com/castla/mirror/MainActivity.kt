@@ -14,6 +14,7 @@ import android.content.pm.PackageManager
 import android.media.projection.MediaProjectionConfig
 import android.media.projection.MediaProjectionManager
 import android.net.Uri
+import android.net.VpnService
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
@@ -58,6 +59,7 @@ import androidx.lifecycle.repeatOnLifecycle
 import com.castla.mirror.network.NetworkMonitor
 import com.castla.mirror.network.NetworkState
 import com.castla.mirror.network.TeslaVirtualIp
+import com.castla.mirror.network.TeslaVpnService
 import com.castla.mirror.diagnostics.FileLogger
 import com.castla.mirror.service.HotspotClientDetector
 import com.castla.mirror.service.MirrorForegroundService
@@ -171,6 +173,18 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private val vpnPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            Log.i(TAG, "VPN permission granted")
+            startTeslaVpnService()
+        } else {
+            Log.w(TAG, "VPN permission denied by user")
+            Toast.makeText(this, "VPN permission is required for Tesla virtual IP", Toast.LENGTH_LONG).show()
+        }
+    }
+
     private val audioPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { _ ->
@@ -251,6 +265,7 @@ class MainActivity : AppCompatActivity() {
                             serviceBound = false
                             bindRequested = false
                         }
+                        stopTeslaVpnService()
                         updateServerUrl()
                         // Clean up hotspot that was auto-enabled by the app
                         if (!pendingStartAfterCleanup && hotspotEnabledByApp && shizukuSetup.serviceConnected.value) {
@@ -643,6 +658,7 @@ class MainActivity : AppCompatActivity() {
         stopAutoDetect()
         shizukuSetup.release()
         downloadProgressJob?.cancel()
+        stopTeslaVpnService()
         try { unregisterReceiver(shizukuDownloadReceiver) } catch (_: IllegalArgumentException) {}
         super.onDestroy()
     }
@@ -652,7 +668,7 @@ class MainActivity : AppCompatActivity() {
         val hotspotIp = currentIp
 
         val ip = when {
-            cellularIp != null && !cellularIp.startsWith("10.") && !cellularIp.startsWith("192.0.0.") -> cellularIp
+            cellularIp != null && !cellularIp.startsWith("10.") -> cellularIp
             hotspotIp != "0.0.0.0" && hotspotIp.isNotEmpty() -> hotspotIp
             else -> "0.0.0.0"
         }
@@ -725,7 +741,7 @@ class MainActivity : AppCompatActivity() {
     private fun refreshHotspotStatus() {
         // Check hotspot status without requiring Shizuku by inspecting network interfaces directly
         try {
-            val hotspotNames = listOf("swlan0", "wlan1", "ap0", "softap0", "wlan2")
+            val hotspotNames = listOf("swlan0", "wlan1", "ap0", "softap0")
             val interfaces = java.net.NetworkInterface.getNetworkInterfaces()?.toList() ?: emptyList()
             val active = interfaces.any { iface ->
                 iface.isUp && hotspotNames.any { name -> iface.name.contains(name) }
@@ -804,72 +820,47 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * Tesla compatibility mode: alias 100.99.9.9 onto the hotspot interface so
-     * the Tesla browser (which refuses RFC1918 ranges) can reach the server.
-     * Idempotent; runs entirely on the IO dispatcher; never blocks mirroring.
+     * Prepares and starts TeslaVpnService to assign the virtual IP (100.99.9.9)
+     * without needing Root or unreliable shell commands.
+     * VpnService is more reliable than `ip addr add` via Shizuku on modern Android.
      */
     private fun setupTeslaVirtualIp() {
-        if (!shizukuSetup.serviceConnected.value) {
-            Log.i(TAG, "TeslaVirtualIp: privileged service not connected, skipping")
-            return
+        val intent = VpnService.prepare(this)
+        if (intent != null) {
+            Log.i(TAG, "Requesting VPN permission for TeslaVirtualIp")
+            vpnPermissionLauncher.launch(intent)
+        } else {
+            Log.i(TAG, "VPN permission already granted, starting TeslaVpnService")
+            startTeslaVpnService()
         }
-        lifecycleScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-            // Hotspot interface may take a few seconds to appear after enabling.
-            var ifName: String? = null
-            for (attempt in 1..15) {
-                val out = shizukuSetup.exec("ip -o addr show")
-                if (out != null) {
-                    val addrs = TeslaVirtualIp.parseInterfaceAddresses(out)
-                    val found = TeslaVirtualIp.findHotspotInterface(addrs)
-                    if (found != null) {
-                        if (TeslaVirtualIp.hasVirtualAlias(addrs, found)) {
-                            runOnUiThread {
-                                teslaAliasIfName = found
-                                teslaVirtualIpActive = true
-                                updateServerUrl()
-                            }
-                            return@launch
-                        }
-                        ifName = found
-                        break
-                    }
-                }
-                kotlinx.coroutines.delay(1000)
-            }
-            val target = ifName
-            if (target == null) {
-                Log.i(TAG, "TeslaVirtualIp: no hotspot interface (WiFi mode) — skipping")
-                return@launch
-            }
-            val diagLog = shizukuSetup.setupTeslaNetwork(target)
-            Log.i(TAG, "TeslaVirtualIp setup:\n$diagLog")
-            // Persist the full diagnostic so the on-disk log shows whether the
-            // alias-already-present fast-path, netd, or ip fallback succeeded —
-            // not just the trailing RESULT marker (which can be preceded by an
-            // empty line from appendLine()).
-            FileLogger.i(TAG, "TeslaVirtualIp setup on $target:\n$diagLog")
-            if (TeslaVirtualIp.setupSucceeded(diagLog)) {
-                runOnUiThread {
-                    teslaAliasIfName = target
-                    teslaVirtualIpActive = true
-                    updateServerUrl()
-                }
-            } else {
-                Log.w(TAG, "TeslaVirtualIp: setup failed, keeping original URL")
-                FileLogger.w(TAG, "TeslaVirtualIp setup failed on $target:\n$diagLog")
-            }
+    }
+
+    private fun startTeslaVpnService() {
+        try {
+            val intent = Intent(this, TeslaVpnService::class.java)
+            startService(intent)
+            teslaVirtualIpActive = true
+            updateServerUrl()
+            Log.i(TAG, "TeslaVpnService started successfully")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to start TeslaVpnService", e)
+            teslaVirtualIpActive = false
+        }
+    }
+
+    private fun stopTeslaVpnService() {
+        try {
+            val intent = Intent(this, TeslaVpnService::class.java)
+            stopService(intent)
+            teslaVirtualIpActive = false
+            Log.i(TAG, "TeslaVpnService stopped")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to stop TeslaVpnService", e)
         }
     }
 
     private fun teardownTeslaVirtualIp() {
-        val ifName = teslaAliasIfName ?: return
-        teslaAliasIfName = null
-        teslaVirtualIpActive = false
-        lifecycleScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-            val ok = shizukuSetup.removeTeslaNetwork(ifName)
-            Log.i(TAG, "TeslaVirtualIp teardown on $ifName: $ok")
-            FileLogger.i(TAG, "TeslaVirtualIp teardown on $ifName: $ok")
-        }
+        stopTeslaVpnService()
     }
 
 
