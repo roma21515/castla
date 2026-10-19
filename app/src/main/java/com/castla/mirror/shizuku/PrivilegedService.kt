@@ -804,7 +804,20 @@ class PrivilegedService : IPrivilegedService.Stub() {
         }
 
         log.appendLine("-- method 1: INetd binder --")
-        if (addInterfaceAddress(ifName, virtualIp, 32)) {
+        try {
+            val smClass = Class.forName("android.os.ServiceManager")
+            val nb = smClass.getMethod("getService", String::class.java).invoke(null, "netd") as? android.os.IBinder
+            log.appendLine("netd binder: ${if (nb == null) "null" else "ok"}")
+            if (nb != null) {
+                val netd = Class.forName("android.net.INetd\$Stub").getMethod("asInterface", android.os.IBinder::class.java).invoke(null, nb)
+                netd.javaClass.getMethod("interfaceAddAddress", String::class.java, String::class.java, Int::class.javaPrimitiveType).invoke(netd, ifName, virtualIp, 32)
+                log.appendLine("netd call returned without exception")
+            }
+        } catch (t: Throwable) {
+            val c = (t as? java.lang.reflect.InvocationTargetException)?.targetException ?: t
+            log.appendLine("netd error: ${c.javaClass.name}: ${c.message}")
+        }
+        if (aliasPresent()) {
             if (aliasPresent()) {
                 log.appendLine("alias verified after netd")
                 log.appendLine("RESULT: OK")
@@ -817,7 +830,8 @@ class PrivilegedService : IPrivilegedService.Stub() {
         }
 
         log.appendLine("-- method 2: ip addr add (shell fallback) --")
-        execCommand("ip addr add $virtualIp/32 dev $ifName")
+        log.appendLine("ip addr add output: " + execCommand("ip addr add $virtualIp/32 dev $ifName 2>&1").trim())
+        log.appendLine("id: " + execCommand("id").trim())
         if (aliasPresent()) {
             log.appendLine("alias verified after ip command")
             log.appendLine("RESULT: OK")
