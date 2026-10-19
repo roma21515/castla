@@ -652,7 +652,7 @@ class MainActivity : AppCompatActivity() {
         val hotspotIp = currentIp
 
         val ip = when {
-            cellularIp != null && !cellularIp.startsWith("10.") -> cellularIp
+            cellularIp != null && !cellularIp.startsWith("10.") && !cellularIp.startsWith("192.0.0.") -> cellularIp
             hotspotIp != "0.0.0.0" && hotspotIp.isNotEmpty() -> hotspotIp
             else -> "0.0.0.0"
         }
@@ -725,7 +725,7 @@ class MainActivity : AppCompatActivity() {
     private fun refreshHotspotStatus() {
         // Check hotspot status without requiring Shizuku by inspecting network interfaces directly
         try {
-            val hotspotNames = listOf("swlan0", "wlan1", "ap0", "softap0")
+            val hotspotNames = listOf("swlan0", "wlan1", "ap0", "softap0", "wlan2")
             val interfaces = java.net.NetworkInterface.getNetworkInterfaces()?.toList() ?: emptyList()
             val active = interfaces.any { iface ->
                 iface.isUp && hotspotNames.any { name -> iface.name.contains(name) }
