@@ -76,6 +76,7 @@ class VideoEncoder(
         }
 
         val encoder = MediaCodec.createEncoderByType(MIME_TYPE)
+        Log.i(TAG, "Encoder: ${encoder.name}")
         encoder.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
         val surface = encoder.createInputSurface()
         codec = encoder
