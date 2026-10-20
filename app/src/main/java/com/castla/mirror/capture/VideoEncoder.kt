@@ -9,6 +9,7 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.util.Log
 import android.view.Surface
+import com.castla.mirror.diagnostics.FileLogger
 import java.nio.ByteBuffer
 
 class VideoEncoder(
@@ -76,12 +77,12 @@ class VideoEncoder(
         }
 
         val encoder = MediaCodec.createEncoderByType(MIME_TYPE)
-        Log.i(TAG, "Encoder: ${encoder.name}")
         encoder.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
         val surface = encoder.createInputSurface()
         codec = encoder
 
         Log.i(TAG, "Encoder created ($profileName): ${width}x${height} @ ${bitrate / 1000}kbps, ${fps}fps")
+        FileLogger.i(TAG, "Encoder: ${encoder.name} ($profileName) ${width}x${height} @ ${bitrate / 1000}kbps, ${fps}fps")
         return surface
     }
 
