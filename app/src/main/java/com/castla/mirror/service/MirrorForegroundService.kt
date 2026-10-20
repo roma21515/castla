@@ -3293,6 +3293,7 @@ class MirrorForegroundService : Service() {
         if (!CodecModeTransition.shouldApply(mode, currentCodecMode, jpegEncoder != null)) return
         currentCodecMode = CodecModeTransition.MODE_MJPEG
         Log.i(TAG, "Codec mode request: mjpeg — delegating to rebuildPipeline")
+        FileLogger.i(TAG, "Codec mode request: mjpeg (browser has no WebCodecs) — rebuilding pipeline")
         serviceScope.launch {
             try {
                 rebuildPipeline(currentWidth, currentHeight, force = true)
