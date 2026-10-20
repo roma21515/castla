@@ -15,12 +15,26 @@ class TeslaVpnService : VpnService() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         try {
             // Создаем виртуальный TUN-интерфейс с вашим IP
-            vpnInterface = Builder()
+            val builder = Builder()
                 .setSession("CastlaVirtualIp")
                 .addAddress(TeslaVirtualIp.VIRTUAL_IP, TeslaVirtualIp.VIRTUAL_PREFIX)
                 .addRoute(TeslaVirtualIp.VIRTUAL_IP, TeslaVirtualIp.VIRTUAL_PREFIX)
                 .setMtu(1500)
-                .establish()
+                .setBlocking(true)
+            // Keep Castla's own sockets (HTTP server replies) out of the VPN routing,
+            // so replies to hotspot clients go out via the hotspot interface.
+            try {
+                builder.addDisallowedApplication(packageName)
+            } catch (e: Exception) {
+                android.util.Log.w("TeslaVpnService", "addDisallowedApplication failed", e)
+            }
+            vpnInterface = builder.establish()
+            if (vpnInterface == null) {
+                android.util.Log.e("TeslaVpnService", "establish() returned null (VPN permission revoked?)")
+                stopSelf()
+                return START_NOT_STICKY
+            }
+            android.util.Log.i("TeslaVpnService", "VPN established, ${TeslaVirtualIp.VIRTUAL_IP}/${TeslaVirtualIp.VIRTUAL_PREFIX}")
 
             isRunning = true
             
